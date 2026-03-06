@@ -1,0 +1,31 @@
+# Virtual environment
+.venv/
+venv/
+
+# Environment variables (secrets)
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Data folders
+Output/
+Input/
+
+# IDE
+.vscode/
+.idea/
+
+# Test artifacts
+.pytest_cache/
+test.zip
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Generated docs
+*.docx
+*.xlsx
