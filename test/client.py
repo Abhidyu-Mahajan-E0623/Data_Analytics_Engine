@@ -25,7 +25,7 @@ HYPOTHESIS_DIR = SCRIPT_DIR / "Hypothesis"
 INSIGHT_DIR = SCRIPT_DIR / "Insight"
 
 # ── Configure this to point to the running API server ──────────────────
-API_BASE_URL = "http://127.0.0.1:8000"
+API_BASE_URL = "https://azureapi-instance-gzd2h9dzhafbbcgv.centralus-01.azurewebsites.net"
 # ───────────────────────────────────────────────────────────────────────
 
 
