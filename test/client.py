@@ -16,6 +16,7 @@ import os
 import sys
 from pathlib import Path
 
+import pip_system_certs.wrapt_requests  # noqa: F401  — patches SSL to use Windows certs
 import requests
 
 # ── Output folders (created next to this script) ──────────────────────
@@ -47,16 +48,23 @@ def ensure_output_dirs():
 
 def check_server():
     """Verify the API server is reachable."""
+    print("  Checking server (Azure cold-start may take up to 60 s)...")
     try:
-        resp = requests.get(f"{API_BASE_URL}/health", timeout=5)
+        resp = requests.get(f"{API_BASE_URL}/health", timeout=60)
         if resp.status_code == 200:
             print("  ✓ Server is online\n")
             return True
-    except requests.ConnectionError:
-        pass
-    print(f"  ✗ Cannot reach server at {API_BASE_URL}")
-    print("    Make sure the API server is running:")
-    print("    uvicorn api.server:app --host 0.0.0.0 --port 8000\n")
+        else:
+            print(f"  ✗ Server returned status {resp.status_code}")
+            return False
+    except requests.ConnectionError as e:
+        print(f"  ✗ Cannot reach server at {API_BASE_URL}")
+        print(f"    Error: {e}\n")
+    except requests.Timeout:
+        print(f"  ✗ Server did not respond within 60 seconds.")
+        print(f"    The server may be starting up. Try again in a minute.\n")
+    except Exception as e:
+        print(f"  ✗ Unexpected error: {e}\n")
     return False
 
 
