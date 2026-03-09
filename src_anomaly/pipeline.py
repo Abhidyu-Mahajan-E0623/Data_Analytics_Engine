@@ -67,14 +67,14 @@ def run_bronze_anomaly_detection(
     logger.info(
         "[anomaly] Step 1: Listing available tables in %s.%s",
         resolved_catalog, schema,
-        extra={"run_id": resolved_run_id, "module": "anomaly", "step": "list_tables"},
+        extra={"run_id": resolved_run_id, "log_module": "anomaly", "step": "list_tables"},
     )
     sql_client = DatabricksSQLClient(settings=settings, logger=logger)
     available_tables = _list_tables(sql_client, resolved_catalog, schema)
     logger.info(
         "[anomaly] Found %d tables: %s",
         len(available_tables), sorted(available_tables),
-        extra={"run_id": resolved_run_id, "module": "anomaly", "step": "list_tables"},
+        extra={"run_id": resolved_run_id, "log_module": "anomaly", "step": "list_tables"},
     )
 
     detector_results: list[DetectorResult] = []
@@ -88,7 +88,7 @@ def run_bronze_anomaly_detection(
             logger.info(
                 "[anomaly] Step %d: Running detector — %s",
                 detector_idx, detector_name,
-                extra={"run_id": resolved_run_id, "module": "anomaly", "step": f"detector_{detector_name}"},
+                extra={"run_id": resolved_run_id, "log_module": "anomaly", "step": f"detector_{detector_name}"},
             )
             result = detector_fn(
                 sql_client=sql_client,
@@ -100,7 +100,7 @@ def run_bronze_anomaly_detection(
             logger.info(
                 "[anomaly] Step %d: Detector %s completed — %d anomalies, status=%s",
                 detector_idx, detector_name, result.anomaly_count, result.status,
-                extra={"run_id": resolved_run_id, "module": "anomaly", "step": f"detector_{detector_name}_done"},
+                extra={"run_id": resolved_run_id, "log_module": "anomaly", "step": f"detector_{detector_name}_done"},
             )
         except Exception as exc:  # pragma: no cover - integration path
             logger.exception("Anomaly detector failed: %s", detector_name)
@@ -123,7 +123,7 @@ def run_bronze_anomaly_detection(
     logger.info(
         "[anomaly] Step 5: Rendering anomaly report (total_anomalies=%d)",
         total_anomalies,
-        extra={"run_id": resolved_run_id, "module": "anomaly", "step": "render_report"},
+        extra={"run_id": resolved_run_id, "log_module": "anomaly", "step": "render_report"},
     )
     content = _render_report(
         run_id=resolved_run_id,
@@ -135,7 +135,7 @@ def run_bronze_anomaly_detection(
     logger.info(
         "[anomaly] Step 6: Report saved to %s — anomalies=%s",
         report_path, total_anomalies,
-        extra={"run_id": resolved_run_id, "module": "anomaly", "step": "save_report"},
+        extra={"run_id": resolved_run_id, "log_module": "anomaly", "step": "save_report"},
     )
 
     return AnomalyDetectionOutcome(

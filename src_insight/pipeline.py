@@ -122,7 +122,7 @@ def run_insight_generation(
     logger.info(
         "[insight] Step 1: Loading hypotheses from run %s",
         run_id,
-        extra={"run_id": run_id, "module": "insight", "step": "load_hypotheses"},
+        extra={"run_id": run_id, "log_module": "insight", "step": "load_hypotheses"},
     )
     all_hypotheses = load_validated_hypotheses(run_id)
     if not all_hypotheses:
@@ -140,7 +140,7 @@ def run_insight_generation(
     logger.info(
         "[insight] Step 2: Filtered to %d selected hypotheses: %s",
         len(selected), [h.hypothesis_id for h in selected],
-        extra={"run_id": run_id, "module": "insight", "step": "filter_hypotheses"},
+        extra={"run_id": run_id, "log_module": "insight", "step": "filter_hypotheses"},
     )
 
     # --- Step 3: Fetch metric data from Databricks ---
@@ -153,7 +153,7 @@ def run_insight_generation(
         logger.info(
             "[insight] Step 3: Fetching metric data for %s (%d/%d)",
             hypothesis.hypothesis_id, idx + 1, len(selected),
-            extra={"run_id": run_id, "module": "insight", "step": f"fetch_metrics_{hypothesis.hypothesis_id}"},
+            extra={"run_id": run_id, "log_module": "insight", "step": f"fetch_metrics_{hypothesis.hypothesis_id}"},
         )
         metric_table = _find_metric_table(sql_client, catalog, schema, hypothesis)
         if metric_table:
@@ -163,7 +163,7 @@ def run_insight_generation(
             logger.warning(
                 "[insight] No metric table found for %s in %s.%s",
                 hypothesis.hypothesis_id, catalog, schema,
-                extra={"run_id": run_id, "module": "insight", "step": "metric_missing"},
+                extra={"run_id": run_id, "log_module": "insight", "step": "metric_missing"},
             )
 
         payloads.append({
@@ -188,7 +188,7 @@ def run_insight_generation(
     logger.info(
         "[insight] Step 4: Calling Azure OpenAI for insight generation (%d payloads)",
         len(payloads),
-        extra={"run_id": run_id, "module": "insight", "step": "llm_call"},
+        extra={"run_id": run_id, "log_module": "insight", "step": "llm_call"},
     )
     llm_results = _call_insight_llm(settings, payloads, logger)
 
@@ -196,7 +196,7 @@ def run_insight_generation(
     logger.info(
         "[insight] Step 5: Building %d insight items",
         len(selected),
-        extra={"run_id": run_id, "module": "insight", "step": "build_items"},
+        extra={"run_id": run_id, "log_module": "insight", "step": "build_items"},
     )
     insights: list[InsightItem] = []
     for idx, hypothesis in enumerate(selected):
@@ -217,7 +217,7 @@ def run_insight_generation(
     logger.info(
         "[insight] Step 6: Insight report saved to %s (%d insights)",
         output_path, len(insights),
-        extra={"run_id": run_id, "module": "insight", "step": "save_report"},
+        extra={"run_id": run_id, "log_module": "insight", "step": "save_report"},
     )
 
     return InsightResult(
