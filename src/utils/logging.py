@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
@@ -14,9 +15,12 @@ from src.utils.time import utc_iso
 
 LOGGER_NAME = "schema_maker"
 
+# Extra fields captured in JSON logs
+_EXTRA_FIELDS = ("run_id", "domain", "hypothesis_id", "step", "module")
+
 
 class JsonLogFormatter(logging.Formatter):
-    """Compact JSON formatter."""
+    """Compact JSON formatter with step / module support."""
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
@@ -25,16 +29,21 @@ class JsonLogFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        for key in ("run_id", "domain", "hypothesis_id"):
-            if hasattr(record, key):
-                payload[key] = getattr(record, key)
+        for key in _EXTRA_FIELDS:
+            val = getattr(record, key, None)
+            if val is not None:
+                payload[key] = val
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
         return orjson.dumps(payload).decode("utf-8")
 
 
 def configure_logging(run_id: str | None = None, level: int = logging.INFO) -> logging.Logger:
-    """Configure a run-scoped logger writing to Output/logs."""
+    """Configure a run-scoped logger writing to Output/logs and stdout.
+
+    Writes JSON to a rotating log file *and* human-readable lines to stdout
+    (which Azure App Service captures automatically in its Log Stream).
+    """
     ensure_project_dirs()
     logger = logging.getLogger(LOGGER_NAME)
     logger.setLevel(level)
@@ -54,7 +63,8 @@ def configure_logging(run_id: str | None = None, level: int = logging.INFO) -> l
     file_handler.setFormatter(JsonLogFormatter())
     file_handler.setLevel(level)
 
-    stream_handler = logging.StreamHandler()
+    # Explicit stdout so Azure App Service Log Stream captures it
+    stream_handler = logging.StreamHandler(stream=sys.stdout)
     stream_handler.setLevel(level)
     stream_handler.setFormatter(
         logging.Formatter("[%(asctime)s] %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S")

@@ -118,13 +118,17 @@ def run_insight_generation(
     OUTPUT_INSIGHT_DIR.mkdir(parents=True, exist_ok=True)
     logger = logger or configure_logging(run_id=run_id)
 
-    # --- 1. Load hypotheses ---
-    logger.info("Loading hypotheses from run %s", run_id)
+    # --- Step 1: Load hypotheses ---
+    logger.info(
+        "[insight] Step 1: Loading hypotheses from run %s",
+        run_id,
+        extra={"run_id": run_id, "module": "insight", "step": "load_hypotheses"},
+    )
     all_hypotheses = load_validated_hypotheses(run_id)
     if not all_hypotheses:
         raise ValueError(f"No validated hypotheses found for run_id={run_id}")
 
-    # Filter to selected IDs (user enters 1,4,5 → we match H01, H04, H05)
+    # --- Step 2: Filter to selected IDs ---
     selected_hids = {f"H{i:02d}" for i in selected_ids}
     selected = [h for h in all_hypotheses if h.hypothesis_id in selected_hids]
     if not selected:
@@ -133,24 +137,33 @@ def run_insight_generation(
             f"None of the selected hypotheses {sorted(selected_hids)} found. "
             f"Available: {available}"
         )
+    logger.info(
+        "[insight] Step 2: Filtered to %d selected hypotheses: %s",
+        len(selected), [h.hypothesis_id for h in selected],
+        extra={"run_id": run_id, "module": "insight", "step": "filter_hypotheses"},
+    )
 
-    logger.info("Selected %d hypotheses: %s", len(selected), [h.hypothesis_id for h in selected])
-
-    # --- 2. Fetch metric data from Databricks ---
+    # --- Step 3: Fetch metric data from Databricks ---
     sql_client = DatabricksSQLClient(settings=settings, logger=logger)
     catalog = settings.DATABRICKS_CATALOG
     schema = settings.DATABRICKS_SCHEMA_MONITORING
 
     payloads: list[dict[str, Any]] = []
     for idx, hypothesis in enumerate(selected):
+        logger.info(
+            "[insight] Step 3: Fetching metric data for %s (%d/%d)",
+            hypothesis.hypothesis_id, idx + 1, len(selected),
+            extra={"run_id": run_id, "module": "insight", "step": f"fetch_metrics_{hypothesis.hypothesis_id}"},
+        )
         metric_table = _find_metric_table(sql_client, catalog, schema, hypothesis)
         if metric_table:
             stats = _fetch_metric_stats(sql_client, metric_table)
         else:
             stats = {"note": "No metrics table found; using hypothesis definition only."}
             logger.warning(
-                "No metric table found for %s in %s.%s",
+                "[insight] No metric table found for %s in %s.%s",
                 hypothesis.hypothesis_id, catalog, schema,
+                extra={"run_id": run_id, "module": "insight", "step": "metric_missing"},
             )
 
         payloads.append({
@@ -171,11 +184,20 @@ def run_insight_generation(
             "metrics": stats,
         })
 
-    # --- 3. Call LLM for insight generation ---
-    logger.info("Calling Azure OpenAI for insight generation...")
+    # --- Step 4: Call LLM for insight generation ---
+    logger.info(
+        "[insight] Step 4: Calling Azure OpenAI for insight generation (%d payloads)",
+        len(payloads),
+        extra={"run_id": run_id, "module": "insight", "step": "llm_call"},
+    )
     llm_results = _call_insight_llm(settings, payloads, logger)
 
-    # --- 4. Build insight items ---
+    # --- Step 5: Build insight items ---
+    logger.info(
+        "[insight] Step 5: Building %d insight items",
+        len(selected),
+        extra={"run_id": run_id, "module": "insight", "step": "build_items"},
+    )
     insights: list[InsightItem] = []
     for idx, hypothesis in enumerate(selected):
         result_data = llm_results.get(idx, {})
@@ -188,11 +210,15 @@ def run_insight_generation(
             key_metrics=result_data.get("key_metrics", {}),
         ))
 
-    # --- 5. Render and save report ---
+    # --- Step 6: Render and save report ---
     report_content = _render_insight_report(run_id, insights)
     output_path = OUTPUT_INSIGHT_DIR / "Insight.txt"
     atomic_write_text(output_path, report_content + "\n")
-    logger.info("Insight report written to %s", output_path)
+    logger.info(
+        "[insight] Step 6: Insight report saved to %s (%d insights)",
+        output_path, len(insights),
+        extra={"run_id": run_id, "module": "insight", "step": "save_report"},
+    )
 
     return InsightResult(
         run_id=run_id,

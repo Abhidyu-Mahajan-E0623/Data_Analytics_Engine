@@ -2,16 +2,62 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+import logging
+import time
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from api.graphs import anomaly_graph, hypothesis_graph, insight_graph
+
+logger = logging.getLogger("schema_maker.server")
+
+
+# ---------------------------------------------------------------------------
+# Lifespan (startup / shutdown events)
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("🚀 Schema Maker API starting up — server ready to accept requests")
+    yield
+    logger.info("🛑 Schema Maker API shutting down")
+
 
 app = FastAPI(
     title="Schema Maker API",
     description="LangGraph-powered REST API for Anomaly Detection, Hypothesis Generation, and Insight Generation.",
     version="1.0.0",
+    lifespan=lifespan,
 )
+
+
+# ---------------------------------------------------------------------------
+# Request / Response logging middleware
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log every incoming request and outgoing response with timing."""
+    start = time.perf_counter()
+    client = request.client.host if request.client else "unknown"
+    logger.info(
+        "→ %s %s from %s",
+        request.method,
+        request.url.path,
+        client,
+    )
+    response = await call_next(request)
+    duration_ms = (time.perf_counter() - start) * 1000
+    logger.info(
+        "← %s %s → %s (%.0f ms)",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------

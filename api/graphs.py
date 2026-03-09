@@ -63,30 +63,49 @@ class InsightState(TypedDict, total=False):
 
 def anomaly_node(state: AnomalyState) -> dict[str, Any]:
     """Run the anomaly detection pipeline and return formatted report text."""
+    logger = logging.getLogger("schema_maker.graph")
+    logger.info("[anomaly] ▶ Anomaly node started", extra={"module": "anomaly", "step": "start"})
     try:
+        logger.info("[anomaly] Step 1: Loading settings", extra={"module": "anomaly", "step": "load_settings"})
         settings = load_settings_or_raise()
         schema = state.get("schema", "bronze")
         run_id = new_run_id()
-        logger = configure_logging(run_id=run_id)
+        pipe_logger = configure_logging(run_id=run_id)
 
+        logger.info(
+            "[anomaly] Step 2: Running anomaly detection pipeline (run_id=%s, schema=%s)",
+            run_id, schema,
+            extra={"module": "anomaly", "step": "run_pipeline", "run_id": run_id},
+        )
         outcome = run_bronze_anomaly_detection(
             settings=settings,
             run_id=run_id,
             catalog=settings.DATABRICKS_CATALOG,
             schema=schema,
-            logger=logger,
+            logger=pipe_logger,
         )
 
         # Read the generated report file
+        logger.info(
+            "[anomaly] Step 3: Reading report file (total_anomalies=%s)",
+            outcome.total_anomalies,
+            extra={"module": "anomaly", "step": "read_report", "run_id": run_id},
+        )
         report_path = Path(outcome.report_path)
         report_text = report_path.read_text(encoding="utf-8") if report_path.exists() else ""
 
+        logger.info(
+            "[anomaly] ✔ Anomaly node completed — %s anomalies found",
+            outcome.total_anomalies,
+            extra={"module": "anomaly", "step": "done", "run_id": run_id},
+        )
         return {
             "run_id": outcome.run_id,
             "total_anomalies": outcome.total_anomalies,
             "report_text": report_text,
         }
     except Exception as exc:
+        logger.exception("[anomaly] ✘ Anomaly node failed: %s", exc, extra={"module": "anomaly", "step": "error"})
         return {"error": str(exc)}
 
 
@@ -97,7 +116,10 @@ def hypothesis_node(state: HypothesisState) -> dict[str, Any]:
         schema — Databricks schema level for metadata (e.g. 'bronze', 'silver')
         domain — business focus areas, comma-separated (e.g. 'sales,marketing')
     """
+    logger = logging.getLogger("schema_maker.graph")
+    logger.info("[hypothesis] ▶ Hypothesis node started", extra={"module": "hypothesis", "step": "start"})
     try:
+        logger.info("[hypothesis] Step 1: Loading settings", extra={"module": "hypothesis", "step": "load_settings"})
         settings = load_settings_or_raise()
         schema = state.get("schema", settings.DATABRICKS_SCHEMA_DOMAIN)
         domain_raw = state.get("domain", schema)
@@ -112,15 +134,25 @@ def hypothesis_node(state: HypothesisState) -> dict[str, Any]:
             focus_areas = [schema.strip().lower()]
 
         run_id = new_run_id()
-        logger = configure_logging(run_id=run_id)
-        sql_client = DatabricksSQLClient(settings=settings, logger=logger)
-        llm_client = AzureOpenAIClient(settings=settings, logger=logger)
+        pipe_logger = configure_logging(run_id=run_id)
 
+        logger.info(
+            "[hypothesis] Step 2: Initializing clients (run_id=%s, schema=%s, focus_areas=%s)",
+            run_id, schema, focus_areas,
+            extra={"module": "hypothesis", "step": "init_clients", "run_id": run_id},
+        )
+        sql_client = DatabricksSQLClient(settings=settings, logger=pipe_logger)
+        llm_client = AzureOpenAIClient(settings=settings, logger=pipe_logger)
+
+        logger.info(
+            "[hypothesis] Step 3: Running hypothesis generation pipeline",
+            extra={"module": "hypothesis", "step": "run_pipeline", "run_id": run_id},
+        )
         outcome = run_generate_pipeline(
             settings=settings,
             sql_client=sql_client,
             llm_client=llm_client,
-            logger=logger,
+            logger=pipe_logger,
             domain=schema,            # schema is used as the DB schema filter
             focus_areas=focus_areas,   # domain tokens are used as LLM focus
             top_k=settings.DEFAULT_TOP_K,
@@ -129,11 +161,21 @@ def hypothesis_node(state: HypothesisState) -> dict[str, Any]:
         )
 
         # Read back the generated hypotheses.txt
+        logger.info(
+            "[hypothesis] Step 4: Reading generated hypotheses (valid=%s, invalid=%s)",
+            outcome.valid_count, outcome.invalid_count,
+            extra={"module": "hypothesis", "step": "read_output", "run_id": run_id},
+        )
         hypotheses_txt_path = OUTPUT_HYPOTHESES_DIR / outcome.run_id / "hypotheses.txt"
         hypotheses_text = ""
         if hypotheses_txt_path.exists():
             hypotheses_text = hypotheses_txt_path.read_text(encoding="utf-8")
 
+        logger.info(
+            "[hypothesis] ✔ Hypothesis node completed — valid=%s, invalid=%s",
+            outcome.valid_count, outcome.invalid_count,
+            extra={"module": "hypothesis", "step": "done", "run_id": run_id},
+        )
         return {
             "run_id": outcome.run_id,
             "valid_count": outcome.valid_count,
@@ -142,12 +184,16 @@ def hypothesis_node(state: HypothesisState) -> dict[str, Any]:
             "metrics_tables_created": outcome.valid_count > 0,
         }
     except Exception as exc:
+        logger.exception("[hypothesis] ✘ Hypothesis node failed: %s", exc, extra={"module": "hypothesis", "step": "error"})
         return {"error": str(exc)}
 
 
 def insight_node(state: InsightState) -> dict[str, Any]:
     """Run insight generation for selected hypotheses."""
+    logger = logging.getLogger("schema_maker.graph")
+    logger.info("[insight] ▶ Insight node started", extra={"module": "insight", "step": "start"})
     try:
+        logger.info("[insight] Step 1: Loading settings", extra={"module": "insight", "step": "load_settings"})
         settings = load_settings_or_raise()
 
         # Resolve run_id (use latest if not provided)
@@ -155,11 +201,13 @@ def insight_node(state: InsightState) -> dict[str, Any]:
         if not run_id:
             run_id = get_latest_run_id() or ""
         if not run_id:
+            logger.warning("[insight] No run_id provided and no latest run found", extra={"module": "insight", "step": "no_run_id"})
             return {"error": "No run_id provided and no latest run found. Run hypothesis generation first."}
 
         # Resolve hypothesis IDs (use all if not provided)
         hypothesis_ids = state.get("hypothesis_ids", [])
         if not hypothesis_ids:
+            logger.info("[insight] Step 2: No hypothesis IDs provided — listing all for run %s", run_id, extra={"module": "insight", "step": "list_hypotheses"})
             available = list_hypotheses_for_run(run_id)
             if not available:
                 return {"error": f"No hypotheses found for run_id={run_id}."}
@@ -168,24 +216,40 @@ def insight_node(state: InsightState) -> dict[str, Any]:
                 for h in available
             ]
 
-        logger = configure_logging(run_id=run_id)
+        logger.info(
+            "[insight] Step 3: Running insight generation (run_id=%s, hypothesis_ids=%s)",
+            run_id, hypothesis_ids,
+            extra={"module": "insight", "step": "run_pipeline", "run_id": run_id},
+        )
+        pipe_logger = configure_logging(run_id=run_id)
         result = run_insight_generation(
             settings=settings,
             run_id=run_id,
             selected_ids=hypothesis_ids,
-            logger=logger,
+            logger=pipe_logger,
         )
 
         # Read the generated insight report
+        logger.info(
+            "[insight] Step 4: Reading generated insight report (%s insights)",
+            result.insight_count,
+            extra={"module": "insight", "step": "read_report", "run_id": run_id},
+        )
         output_path = Path(result.output_path)
         insight_text = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
 
+        logger.info(
+            "[insight] ✔ Insight node completed — %s insights generated",
+            result.insight_count,
+            extra={"module": "insight", "step": "done", "run_id": run_id},
+        )
         return {
             "run_id": result.run_id,
             "insight_count": result.insight_count,
             "insight_text": insight_text,
         }
     except Exception as exc:
+        logger.exception("[insight] ✘ Insight node failed: %s", exc, extra={"module": "insight", "step": "error"})
         return {"error": str(exc)}
 
 

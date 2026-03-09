@@ -61,7 +61,11 @@ def run_generate_pipeline(
     if not resolved_focus_areas:
         resolved_focus_areas = [domain.strip().lower()]
 
-    logger.info("Starting generation run", extra={"run_id": run_id, "domain": domain})
+    logger.info(
+        "[hypothesis] ▶ Generation pipeline started (run_id=%s, domain=%s, focus_areas=%s, top_k=%d)",
+        run_id, domain, resolved_focus_areas, top_k,
+        extra={"run_id": run_id, "domain": domain, "module": "hypothesis", "step": "start"},
+    )
     save_run_input(
         run_id,
         {
@@ -74,6 +78,12 @@ def run_generate_pipeline(
         },
     )
 
+    # Step 1: Fetch metadata
+    logger.info(
+        "[hypothesis] Step 1: Fetching metadata from Databricks (catalog=%s, domain=%s)",
+        settings.DATABRICKS_CATALOG, domain,
+        extra={"run_id": run_id, "module": "hypothesis", "step": "fetch_metadata"},
+    )
     meta_connector = DatabricksMetadataConnector(sql_client=sql_client, logger=logger)
     metadata_snapshot = meta_connector.fetch_metadata(
         catalog=settings.DATABRICKS_CATALOG,
@@ -83,6 +93,12 @@ def run_generate_pipeline(
     metadata_snapshot_dict = metadata_snapshot.to_dict()
     save_metadata_snapshot(run_id=run_id, snapshot=metadata_snapshot_dict)
 
+    # Step 2: Select context bundle
+    logger.info(
+        "[hypothesis] Step 2: Selecting context bundle (top_k=%d)",
+        top_k,
+        extra={"run_id": run_id, "module": "hypothesis", "step": "select_context"},
+    )
     context_bundle = select_context_bundle(
         metadata_snapshot,
         domain=domain,
@@ -92,11 +108,22 @@ def run_generate_pipeline(
     table_assignment_plan = _build_table_assignment_plan(context_bundle, EXPECTED_IDS)
     save_context_bundle(run_id=run_id, context_bundle=context_bundle)
 
+    # Step 3: Build generation prompt
+    logger.info(
+        "[hypothesis] Step 3: Building generation prompt",
+        extra={"run_id": run_id, "module": "hypothesis", "step": "build_prompt"},
+    )
     prompt_messages = build_generation_messages(
         domain=domain,
         context_bundle=context_bundle,
         focus_areas=resolved_focus_areas,
         business_constraints=business_constraints,
+    )
+
+    # Step 4: Call LLM for hypothesis generation
+    logger.info(
+        "[hypothesis] Step 4: Calling LLM for hypothesis generation",
+        extra={"run_id": run_id, "module": "hypothesis", "step": "llm_generate"},
     )
     first_generation = llm_client.generate_hypotheses(
         domain=domain,
@@ -116,7 +143,13 @@ def run_generate_pipeline(
         },
     )
 
+    # Step 5: Parse JSONL lines
     all_raw_lines = list(first_generation.jsonl_lines)
+    logger.info(
+        "[hypothesis] Step 5: Parsing %d JSONL lines",
+        len(all_raw_lines),
+        extra={"run_id": run_id, "module": "hypothesis", "step": "parse_jsonl"},
+    )
     parsed = parse_jsonl_hypotheses(
         first_generation.jsonl_lines,
         context_bundle=context_bundle,
@@ -124,11 +157,18 @@ def run_generate_pipeline(
     hypothesis_map = dict(parsed.hypotheses_by_id)
     parse_errors = list(parsed.parse_errors)
 
+    # Step 6: Validate hypotheses
+    logger.info(
+        "[hypothesis] Step 6: Validating hypotheses (parsed=%d, parse_errors=%d)",
+        len(hypothesis_map), len(parse_errors),
+        extra={"run_id": run_id, "module": "hypothesis", "step": "validate"},
+    )
     catalog_index = build_catalog_index(metadata_snapshot_dict)
     valid, invalid = validate_hypothesis_set(hypothesis_map, catalog_index, sql_client)
     _enforce_expected_ids(hypothesis_map, invalid)
     _enforce_table_assignment(hypothesis_map, invalid, table_assignment_plan)
 
+    # Step 7: Repair loop
     repair_history: list[dict[str, Any]] = []
     repair_attempt = 0
     while repair_attempt < max_repair_attempts and _repairable_ids(invalid):
@@ -137,10 +177,9 @@ def run_generate_pipeline(
         if parse_errors:
             repair_targets["_parse_errors"] = parse_errors[-20:]
         logger.info(
-            "Running repair attempt %s for %s hypotheses",
-            repair_attempt,
-            len(repair_targets),
-            extra={"run_id": run_id},
+            "[hypothesis] Step 7: Repair attempt %d for %d hypotheses",
+            repair_attempt, len(repair_targets),
+            extra={"run_id": run_id, "module": "hypothesis", "step": f"repair_{repair_attempt}"},
         )
         repaired = llm_client.repair_hypotheses(
             domain=domain,
@@ -206,6 +245,12 @@ def run_generate_pipeline(
         },
     }
 
+    # Step 8: Save hypothesis artifacts
+    logger.info(
+        "[hypothesis] Step 8: Saving hypothesis artifacts (valid=%d, invalid=%d)",
+        len(valid_models), len(EXPECTED_IDS) - len(valid_models),
+        extra={"run_id": run_id, "module": "hypothesis", "step": "save_artifacts"},
+    )
     paths = save_hypothesis_artifacts(
         run_id=run_id,
         human_text=first_generation.human_text,
@@ -215,7 +260,13 @@ def run_generate_pipeline(
         run_meta=run_meta,
     )
 
+    # Step 9: Create metrics tables
     if valid_models:
+        logger.info(
+            "[hypothesis] Step 9: Creating metrics tables for %d valid hypotheses",
+            len(valid_models),
+            extra={"run_id": run_id, "module": "hypothesis", "step": "create_metrics"},
+        )
         metrics_tables = create_or_replace_metrics_tables(
             sql_client=sql_client,
             settings=settings,
@@ -226,16 +277,16 @@ def run_generate_pipeline(
             metadata_snapshot=metadata_snapshot_dict,
         )
         logger.info(
-            "Metrics tables refreshed: %s",
+            "[hypothesis] Step 9: Metrics tables refreshed: %s",
             ", ".join(metrics_tables) if metrics_tables else "(none)",
-            extra={"run_id": run_id},
+            extra={"run_id": run_id, "module": "hypothesis", "step": "metrics_done"},
         )
 
+    # Step 10: Done
     logger.info(
-        "Generation completed: valid=%s invalid=%s",
-        len(valid_models),
-        len(EXPECTED_IDS) - len(valid_models),
-        extra={"run_id": run_id},
+        "[hypothesis] ✔ Generation completed — valid=%d, invalid=%d",
+        len(valid_models), len(EXPECTED_IDS) - len(valid_models),
+        extra={"run_id": run_id, "module": "hypothesis", "step": "done"},
     )
     return GenerateOutcome(
         run_id=run_id,
