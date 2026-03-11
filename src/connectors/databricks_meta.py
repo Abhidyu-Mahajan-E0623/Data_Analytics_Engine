@@ -66,8 +66,16 @@ class DatabricksMetadataConnector:
         domain: str,
         quality_preference: str = "gold",
         quality_tier: str | None = None,
+        table_name_prefix: str = "snr",
     ) -> MetadataSnapshot:
-        """Fetch and assemble metadata from Unity Catalog information_schema."""
+        """Fetch and assemble metadata from Unity Catalog information_schema.
+
+        Args:
+            table_name_prefix: Only include tables whose name starts with this
+                prefix (case-insensitive). Default ``"snr"`` so that only SNR
+                tables are used for hypothesis generation. Pass ``""`` to
+                disable the filter.
+        """
         columns = self._fetch_columns(catalog)
         table_tags = self._fetch_table_tags(catalog)
         column_tags = self._fetch_column_tags(catalog)
@@ -75,6 +83,7 @@ class DatabricksMetadataConnector:
         table_map: dict[tuple[str, str, str], TableMetadata] = {}
         requested_domain = domain.strip().lower()
         requested_tier = quality_tier.strip().lower() if quality_tier else None
+        prefix_lower = table_name_prefix.strip().lower() if table_name_prefix else ""
 
         for row in columns:
             table_key = (row["catalog"], row["schema_name"], row["table_name"])
@@ -82,6 +91,10 @@ class DatabricksMetadataConnector:
             table_domain = tags.get("domain", "").strip().lower()
             schema_name = row["schema_name"].lower()
             table_quality = _resolve_quality_tier(tags)
+
+            # SNR table name prefix filter
+            if prefix_lower and not row["table_name"].lower().startswith(prefix_lower):
+                continue
 
             if requested_domain:
                 schema_match = requested_domain == schema_name or requested_domain in schema_name
@@ -116,7 +129,7 @@ class DatabricksMetadataConnector:
 
         tables = list(table_map.values())
         if self._logger:
-            self._logger.info("Fetched metadata tables=%s", len(tables))
+            self._logger.info("Fetched metadata tables=%s (prefix_filter=%s)", len(tables), prefix_lower or "none")
 
         return MetadataSnapshot(
             fetched_at=utc_iso(),

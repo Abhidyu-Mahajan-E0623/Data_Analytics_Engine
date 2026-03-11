@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import logging
 import time
+import os
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from api.graphs import anomaly_graph, hypothesis_graph, insight_graph
 
 logger = logging.getLogger("schema_maker.server")
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DASHBOARD_DIR = PROJECT_ROOT / "dashboard"
+OUTPUT_DIR = PROJECT_ROOT / "Output"
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +214,55 @@ async def run_insight(request: InsightRequest = InsightRequest()) -> InsightResp
 # Health check
 # ---------------------------------------------------------------------------
 
-@app.get("/health")
-async def health() -> dict[str, str]:
-    """Simple health check endpoint."""
-    return {"status": "ok"}
+# ---------------------------------------------------------------------------
+# Frontend & Report Serving
+# ---------------------------------------------------------------------------
+
+def _get_latest_file(directory: Path, filename: str) -> Path | None:
+    """Find the target file — first in the latest run sub-dir, then directly in the directory."""
+    if not directory.exists():
+        return None
+    # Check inside run sub-directories first (sorted newest-first)
+    run_dirs = sorted(
+        [d for d in directory.iterdir() if d.is_dir()],
+        key=lambda d: d.name,
+        reverse=True,
+    )
+    for run_dir in run_dirs:
+        target_file = run_dir / filename
+        if target_file.exists():
+            return target_file
+    # Fall back: check if the file exists directly in the directory
+    direct = directory / filename
+    if direct.exists():
+        return direct
+    return None
+
+@app.get("/api/latest_anomaly")
+async def get_latest_anomaly():
+    """Serve the most recent anomalies.txt file."""
+    file_path = _get_latest_file(OUTPUT_DIR / "Anomaly", "anomalies.txt")
+    if not file_path:
+        raise HTTPException(status_code=404, detail="No anomaly report found")
+    return FileResponse(file_path, media_type="text/plain")
+
+@app.get("/api/latest_hypothesis")
+async def get_latest_hypothesis():
+    """Serve the most recent hypotheses.txt file."""
+    file_path = _get_latest_file(OUTPUT_DIR / "hypotheses", "hypotheses.txt")
+    if not file_path:
+        raise HTTPException(status_code=404, detail="No hypotheses found")
+    return FileResponse(file_path, media_type="text/plain")
+
+@app.get("/api/latest_insight")
+async def get_latest_insight():
+    """Serve the most recent Insight.txt file."""
+    file_path = _get_latest_file(OUTPUT_DIR / "Insight", "Insight.txt")
+    if not file_path:
+        raise HTTPException(status_code=404, detail="No insights found")
+    return FileResponse(file_path, media_type="text/plain")
+
+
+# Static Frontend Routing (Must be at the bottom)
+if DASHBOARD_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(DASHBOARD_DIR), html=True), name="dashboard")

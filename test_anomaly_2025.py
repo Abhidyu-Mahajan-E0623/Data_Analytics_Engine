@@ -1,12 +1,10 @@
 """
-Standalone 2025 Anomaly Test Script
-------------------------------------
-Runs anomaly detection for 2025 only, showing ALL months and weeks
-with a Y/N Outlier column. Outputs to Anomaly_2025.txt.
-
-Uses fixed full-year P1/P99 percentiles computed from all 2025 data.
-
-This is a standalone test script, separate from the main project pipeline.
+Standalone 2025 Anomaly Test Script — SNR Tables
+-------------------------------------------------
+Runs anomaly detection for 5 SNR tables.
+Training: Jan–Oct 2025 (P1/P99 percentiles).
+Test: November 2025 data checked against those bounds.
+Outputs to Anomaly_2025.txt.
 """
 
 import os
@@ -22,12 +20,19 @@ CATALOG = os.getenv("DATABRICKS_CATALOG", "new_claim_catalog")
 SCHEMA = "bronze"
 HTTP_PATH = f"/sql/1.0/warehouses/{WAREHOUSE_ID}"
 
-# -------------------------------------------------------------------
-# Table and column discovery
-# -------------------------------------------------------------------
-TABLE_CANDIDATES = ["raw_ics_867_csl", "raw_ics_867_csl_sales"]
-DATE_CANDIDATES = ["report_date_v", "report_date", "sale_date", "sales_date", "invoice_date"]
-QTY_CANDIDATES = ["sales_qty_v", "sales_qty", "quantity", "qty", "sales_quantity"]
+TRAINING_START = "2025-01-01"
+TRAINING_END = "2025-10-31"
+TEST_START = "2025-11-01"
+TEST_END = "2025-11-30"
+
+# Table configs: (table_name, date_col, metric_expr, metric_label, group_col or None)
+TABLE_CONFIGS = [
+    ("snr_dim_snr_change_log", "staged_file_date", "COUNT(*)", "Record Count", None),
+    ("snr_dim_snr_demographics", "staged_file_date", "COUNT(*)", "Record Count", "outlet_class_of_trade"),
+    ("snr_dim_snr_product", "staged_file_date", "COUNT(*)", "Record Count", None),
+    ("snr_fact_snr_control", "week_ending_date", "SUM(COALESCE(TRY_CAST(`volume_units` AS DOUBLE), 0.0))", "Volume Units", None),
+    ("snr_fact_snr_sales", "week_ending_date", "SUM(COALESCE(TRY_CAST(`volume_units` AS DOUBLE), 0.0))", "Volume Units", None),
+]
 
 OUTPUT_FILE = os.path.join(os.path.dirname(__file__), "Anomaly_2025.txt")
 
@@ -47,257 +52,128 @@ def fetch_all(conn, query):
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
 
-def find_table(conn):
-    rows = fetch_all(conn, f"SHOW TABLES IN `{CATALOG}`.`{SCHEMA}`")
-    available = set()
-    for row in rows:
-        name = row.get("tablename") or row.get("table_name") or row.get("table")
-        if name:
-            available.add(str(name).strip().lower())
-    for candidate in TABLE_CANDIDATES:
-        if candidate.lower() in available:
-            return candidate.lower()
-    return None
-
-
-def find_columns(conn, table_name):
-    rows = fetch_all(conn, f"""
-        SELECT LOWER(column_name) AS column_name
-        FROM `{CATALOG}`.information_schema.columns
-        WHERE table_schema = '{SCHEMA}' AND table_name = '{table_name}'
-    """)
-    return {str(r["column_name"]).strip().lower() for r in rows}
-
-
-def pick(columns, candidates):
-    for c in candidates:
-        if c.lower() in columns:
-            return c.lower()
-    return None
-
-
 def fmt(value):
     if value is None:
         return "N/A"
     return f"{float(value):,.2f}"
 
 
+def run_quartile_check(conn, table_fqn, date_col, metric_expr, trunc_expr, extra_filter, min_window):
+    """Run P1/P99 quartile check: train on Jan-Oct, test on Nov."""
+    query = f"""
+    WITH training AS (
+        SELECT
+            {trunc_expr} AS period,
+            {metric_expr} AS metric_value
+        FROM {table_fqn}
+        WHERE `{date_col}` IS NOT NULL
+          AND TO_DATE(`{date_col}`) >= '{TRAINING_START}'
+          AND TO_DATE(`{date_col}`) <= '{TRAINING_END}'
+          {extra_filter}
+        GROUP BY {trunc_expr}
+    ),
+    bounds AS (
+        SELECT
+            PERCENTILE_CONT(0.01) WITHIN GROUP (ORDER BY metric_value) AS p01,
+            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY metric_value) AS p99,
+            COUNT(*) AS window_size
+        FROM training
+    ),
+    test_data AS (
+        SELECT
+            {trunc_expr} AS period,
+            {metric_expr} AS metric_value
+        FROM {table_fqn}
+        WHERE `{date_col}` IS NOT NULL
+          AND TO_DATE(`{date_col}`) >= '{TEST_START}'
+          AND TO_DATE(`{date_col}`) <= '{TEST_END}'
+          {extra_filter}
+        GROUP BY {trunc_expr}
+    )
+    SELECT
+        CAST(t.period AS STRING) AS period,
+        t.metric_value,
+        b.p01,
+        b.p99,
+        b.window_size
+    FROM test_data t
+    CROSS JOIN bounds b
+    ORDER BY t.period
+    """
+    return fetch_all(conn, query)
+
+
+def check_anomaly(row, min_window):
+    """Check if a row is an anomaly."""
+    val = row.get("metric_value")
+    p01 = row.get("p01")
+    p99 = row.get("p99")
+    ws = row.get("window_size") or 0
+    if val is None or p01 is None or p99 is None or ws < min_window:
+        return "-"
+    if float(val) < float(p01) or float(val) > float(p99):
+        return "Y"
+    return "N"
+
+
 def run():
     print("Connecting to Databricks...")
     conn = connect()
 
-    table_name = find_table(conn)
-    if not table_name:
-        print(f"ERROR: No sales table found. Checked: {TABLE_CANDIDATES}")
-        conn.close()
-        return
-
-    table_fqn = f"`{CATALOG}`.`{SCHEMA}`.`{table_name}`"
-    columns = find_columns(conn, table_name)
-    date_col = pick(columns, DATE_CANDIDATES)
-    qty_col = pick(columns, QTY_CANDIDATES)
-
-    if not date_col or not qty_col:
-        print(f"ERROR: Missing columns. date={date_col}, qty={qty_col}")
-        conn.close()
-        return
-
-    print(f"Table: {table_fqn}")
-    print(f"Date column: {date_col}, Qty column: {qty_col}")
-
     lines = []
     lines.append("=" * 80)
-    lines.append("        ANOMALY DETECTION TEST REPORT — 2025")
+    lines.append("        SNR TABLE ANOMALY TEST REPORT — 2025")
     lines.append("=" * 80)
-    lines.append(f"  Table : {CATALOG}.{SCHEMA}.{table_name}")
-    lines.append(f"  Method: 1st / 99th Percentile (full-year fixed bounds)")
-    lines.append(f"  Year  : 2025 only")
+    lines.append(f"  Training : {TRAINING_START} to {TRAINING_END}")
+    lines.append(f"  Test     : {TEST_START} to {TEST_END}")
+    lines.append(f"  Method   : P1/P99 Percentile (quartile bounds from training data)")
     lines.append("")
 
-    # ---------------------------------------------------------------
-    # MONTHLY — fixed full-year P1/P99 bounds
-    # ---------------------------------------------------------------
-    print("Running monthly analysis...")
-    monthly_query = f"""
-    WITH monthly AS (
-        SELECT
-            DATE_TRUNC('month', TO_DATE(`{date_col}`)) AS period,
-            SUM(COALESCE(TRY_CAST(`{qty_col}` AS DOUBLE), 0.0)) AS total_qty
-        FROM {table_fqn}
-        WHERE `{date_col}` IS NOT NULL
-          AND YEAR(TO_DATE(`{date_col}`)) = 2025
-        GROUP BY DATE_TRUNC('month', TO_DATE(`{date_col}`))
-    ),
-    yearly_bounds AS (
-        SELECT
-            PERCENTILE_CONT(0.01) WITHIN GROUP (ORDER BY total_qty) AS p01,
-            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY total_qty) AS p99,
-            COUNT(*) AS window_size
-        FROM monthly
-    )
-    SELECT
-        CAST(m.period AS STRING) AS period,
-        m.total_qty,
-        b.p01,
-        b.p99,
-        b.window_size
-    FROM monthly m
-    CROSS JOIN yearly_bounds b
-    ORDER BY m.period
-    """
-    monthly_rows = fetch_all(conn, monthly_query)
+    total_anomalies = 0
 
-    lines.append("-" * 80)
-    lines.append("  MONTHLY TRENDS (full-year P1/P99 bounds)")
-    lines.append("-" * 80)
-    hdr = f"  {'Month':<12} {'Sales Volume':>16} {'Lower Bound (P1)':>18} {'Upper Bound (P99)':>19} {'Outlier':>9}"
-    lines.append(hdr)
-    lines.append("  " + "-" * 76)
+    for table_name, date_col, metric_expr, metric_label, group_col in TABLE_CONFIGS:
+        table_fqn = f"`{CATALOG}`.`{SCHEMA}`.`{table_name}`"
+        print(f"\n--- Processing: {table_name} ---")
 
-    for row in monthly_rows:
-        period = str(row.get("period", ""))[:7]
-        qty = row.get("total_qty")
-        p01 = row.get("p01")
-        p99 = row.get("p99")
-        ws = row.get("window_size") or 0
+        lines.append("=" * 80)
+        lines.append(f"  TABLE: {CATALOG}.{SCHEMA}.{table_name}")
+        lines.append(f"  Metric: {metric_label}")
+        if group_col:
+            lines.append(f"  Grouped by: {group_col}")
+        lines.append("=" * 80)
 
-        if p01 is not None and p99 is not None and ws >= 3:
-            is_outlier = "Y" if (float(qty) < float(p01) or float(qty) > float(p99)) else "N"
+        if group_col:
+            # Get distinct groups
+            groups_query = f"""
+            SELECT DISTINCT CAST(`{group_col}` AS STRING) AS grp
+            FROM {table_fqn}
+            WHERE `{group_col}` IS NOT NULL
+            ORDER BY grp
+            """
+            groups = [str(r.get("grp", "")) for r in fetch_all(conn, groups_query) if r.get("grp")]
+            print(f"  Found {len(groups)} groups: {groups[:5]}{'...' if len(groups) > 5 else ''}")
+
+            for grp in groups:
+                grp_filter = f"AND CAST(`{group_col}` AS STRING) = '{grp}'"
+                table_anomalies = _run_table_analysis(
+                    conn, lines, table_fqn, date_col, metric_expr, metric_label,
+                    grp_filter, f"[{grp}]",
+                )
+                total_anomalies += table_anomalies
         else:
-            is_outlier = "-"  # not enough data
+            table_anomalies = _run_table_analysis(
+                conn, lines, table_fqn, date_col, metric_expr, metric_label,
+                "", "",
+            )
+            total_anomalies += table_anomalies
 
-        lines.append(f"  {period:<12} {fmt(qty):>16} {fmt(p01):>18} {fmt(p99):>19} {is_outlier:>9}")
+        lines.append("")
 
-    lines.append("  " + "-" * 76)
-    lines.append("")
-
-    # ---------------------------------------------------------------
-    # WEEKLY — fixed full-year P1/P99 bounds
-    # ---------------------------------------------------------------
-    print("Running weekly analysis...")
-    weekly_query = f"""
-    WITH weekly AS (
-        SELECT
-            DATE_TRUNC('week', TO_DATE(`{date_col}`)) AS period,
-            SUM(COALESCE(TRY_CAST(`{qty_col}` AS DOUBLE), 0.0)) AS total_qty
-        FROM {table_fqn}
-        WHERE `{date_col}` IS NOT NULL
-          AND YEAR(TO_DATE(`{date_col}`)) = 2025
-        GROUP BY DATE_TRUNC('week', TO_DATE(`{date_col}`))
-    ),
-    yearly_bounds AS (
-        SELECT
-            PERCENTILE_CONT(0.01) WITHIN GROUP (ORDER BY total_qty) AS p01,
-            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY total_qty) AS p99,
-            COUNT(*) AS window_size
-        FROM weekly
-    )
-    SELECT
-        CAST(w.period AS STRING) AS period,
-        w.total_qty,
-        b.p01,
-        b.p99,
-        b.window_size
-    FROM weekly w
-    CROSS JOIN yearly_bounds b
-    ORDER BY w.period
-    """
-    weekly_rows = fetch_all(conn, weekly_query)
-
-    lines.append("-" * 80)
-    lines.append("  WEEKLY TRENDS (full-year P1/P99 bounds)")
-    lines.append("-" * 80)
-    hdr = f"  {'Week Starting':<14} {'Sales Volume':>16} {'Lower Bound (P1)':>18} {'Upper Bound (P99)':>19} {'Outlier':>9}"
-    lines.append(hdr)
-    lines.append("  " + "-" * 76)
-
-    for row in weekly_rows:
-        period = str(row.get("period", ""))[:10]
-        qty = row.get("total_qty")
-        p01 = row.get("p01")
-        p99 = row.get("p99")
-        ws = row.get("window_size") or 0
-
-        if p01 is not None and p99 is not None and ws >= 5:
-            is_outlier = "Y" if (float(qty) < float(p01) or float(qty) > float(p99)) else "N"
-        else:
-            is_outlier = "-"
-
-        lines.append(f"  {period:<14} {fmt(qty):>16} {fmt(p01):>18} {fmt(p99):>19} {is_outlier:>9}")
-
-    lines.append("  " + "-" * 76)
-    lines.append("")
-
-    # ---------------------------------------------------------------
-    # DAILY — fixed full-year P1/P99 bounds
-    # ---------------------------------------------------------------
-    print("Running daily analysis...")
-    daily_query = f"""
-    WITH daily AS (
-        SELECT
-            TO_DATE(`{date_col}`) AS period,
-            SUM(COALESCE(TRY_CAST(`{qty_col}` AS DOUBLE), 0.0)) AS total_qty
-        FROM {table_fqn}
-        WHERE `{date_col}` IS NOT NULL
-          AND YEAR(TO_DATE(`{date_col}`)) = 2025
-        GROUP BY TO_DATE(`{date_col}`)
-    ),
-    yearly_bounds AS (
-        SELECT
-            PERCENTILE_CONT(0.01) WITHIN GROUP (ORDER BY total_qty) AS p01,
-            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY total_qty) AS p99,
-            COUNT(*) AS window_size
-        FROM daily
-    )
-    SELECT
-        CAST(d.period AS STRING) AS period,
-        d.total_qty,
-        b.p01,
-        b.p99,
-        b.window_size
-    FROM daily d
-    CROSS JOIN yearly_bounds b
-    ORDER BY d.period
-    """
-    daily_rows = fetch_all(conn, daily_query)
-
-    lines.append("-" * 80)
-    lines.append("  DAILY TRENDS (full-year P1/P99 bounds)")
-    lines.append("-" * 80)
-    hdr = f"  {'Date':<12} {'Sales Volume':>16} {'Lower Bound (P1)':>18} {'Upper Bound (P99)':>19} {'Outlier':>9}"
-    lines.append(hdr)
-    lines.append("  " + "-" * 76)
-
-    for row in daily_rows:
-        period = str(row.get("period", ""))[:10]
-        qty = row.get("total_qty")
-        p01 = row.get("p01")
-        p99 = row.get("p99")
-        ws = row.get("window_size") or 0
-
-        if p01 is not None and p99 is not None and ws >= 10:
-            is_outlier = "Y" if (float(qty) < float(p01) or float(qty) > float(p99)) else "N"
-        else:
-            is_outlier = "-"
-
-        lines.append(f"  {period:<12} {fmt(qty):>16} {fmt(p01):>18} {fmt(p99):>19} {is_outlier:>9}")
-
-    lines.append("  " + "-" * 76)
-    lines.append("")
-
-    # ---------------------------------------------------------------
     # Summary
-    # ---------------------------------------------------------------
-    monthly_outliers = sum(1 for row in monthly_rows if _is_outlier(row, 3))
-    weekly_outliers = sum(1 for row in weekly_rows if _is_outlier(row, 5))
-    daily_outliers = sum(1 for row in daily_rows if _is_outlier(row, 10))
-
     lines.append("=" * 80)
     lines.append("  SUMMARY")
     lines.append("=" * 80)
-    lines.append(f"  Monthly : {len(monthly_rows)} periods, {monthly_outliers} outliers")
-    lines.append(f"  Weekly  : {len(weekly_rows)} periods, {weekly_outliers} outliers")
-    lines.append(f"  Daily   : {len(daily_rows)} periods, {daily_outliers} outliers")
+    lines.append(f"  Total anomalies found in November test data: {total_anomalies}")
     lines.append("=" * 80)
 
     conn.close()
@@ -307,19 +183,79 @@ def run():
         f.write(report + "\n")
 
     print(f"\nReport written to: {OUTPUT_FILE}")
-    print(f"Monthly: {len(monthly_rows)} periods, {monthly_outliers} outliers")
-    print(f"Weekly:  {len(weekly_rows)} periods, {weekly_outliers} outliers")
-    print(f"Daily:   {len(daily_rows)} periods, {daily_outliers} outliers")
+    print(f"Total anomalies: {total_anomalies}")
 
 
-def _is_outlier(row, min_window):
-    qty = row.get("total_qty")
-    p01 = row.get("p01")
-    p99 = row.get("p99")
-    ws = row.get("window_size") or 0
-    if p01 is None or p99 is None or ws < min_window:
-        return False
-    return float(qty) < float(p01) or float(qty) > float(p99)
+def _run_table_analysis(conn, lines, table_fqn, date_col, metric_expr, metric_label, extra_filter, label_prefix):
+    """Run monthly/weekly/daily analysis for a table (or table+group)."""
+    anomaly_count = 0
+
+    # --- Monthly ---
+    trunc_monthly = f"DATE_TRUNC('month', TO_DATE(`{date_col}`))"
+    monthly_rows = run_quartile_check(conn, table_fqn, date_col, metric_expr, trunc_monthly, extra_filter, 3)
+
+    if label_prefix:
+        lines.append(f"\n  {label_prefix}")
+    lines.append(f"  --- Monthly {metric_label} ---")
+    hdr = f"    {'Month':<12} {metric_label:>16} {'Lower (P1)':>14} {'Upper (P99)':>14} {'Outlier':>9}"
+    lines.append(hdr)
+    lines.append("    " + "-" * 67)
+
+    for row in monthly_rows:
+        period = str(row.get("period", ""))[:7]
+        val = row.get("metric_value")
+        p01 = row.get("p01")
+        p99 = row.get("p99")
+        outlier = check_anomaly(row, 3)
+        if outlier == "Y":
+            anomaly_count += 1
+        lines.append(f"    {period:<12} {fmt(val):>16} {fmt(p01):>14} {fmt(p99):>14} {outlier:>9}")
+
+    lines.append("    " + "-" * 67)
+
+    # --- Weekly ---
+    trunc_weekly = f"DATE_TRUNC('week', TO_DATE(`{date_col}`))"
+    weekly_rows = run_quartile_check(conn, table_fqn, date_col, metric_expr, trunc_weekly, extra_filter, 5)
+
+    lines.append(f"  --- Weekly {metric_label} ---")
+    hdr = f"    {'Week Starting':<14} {metric_label:>14} {'Lower (P1)':>14} {'Upper (P99)':>14} {'Outlier':>9}"
+    lines.append(hdr)
+    lines.append("    " + "-" * 67)
+
+    for row in weekly_rows:
+        period = str(row.get("period", ""))[:10]
+        val = row.get("metric_value")
+        p01 = row.get("p01")
+        p99 = row.get("p99")
+        outlier = check_anomaly(row, 5)
+        if outlier == "Y":
+            anomaly_count += 1
+        lines.append(f"    {period:<14} {fmt(val):>14} {fmt(p01):>14} {fmt(p99):>14} {outlier:>9}")
+
+    lines.append("    " + "-" * 67)
+
+    # --- Daily ---
+    trunc_daily = f"TO_DATE(`{date_col}`)"
+    daily_rows = run_quartile_check(conn, table_fqn, date_col, metric_expr, trunc_daily, extra_filter, 10)
+
+    lines.append(f"  --- Daily {metric_label} ---")
+    hdr = f"    {'Date':<12} {metric_label:>16} {'Lower (P1)':>14} {'Upper (P99)':>14} {'Outlier':>9}"
+    lines.append(hdr)
+    lines.append("    " + "-" * 67)
+
+    for row in daily_rows:
+        period = str(row.get("period", ""))[:10]
+        val = row.get("metric_value")
+        p01 = row.get("p01")
+        p99 = row.get("p99")
+        outlier = check_anomaly(row, 10)
+        if outlier == "Y":
+            anomaly_count += 1
+        lines.append(f"    {period:<12} {fmt(val):>16} {fmt(p01):>14} {fmt(p99):>14} {outlier:>9}")
+
+    lines.append("    " + "-" * 67)
+
+    return anomaly_count
 
 
 if __name__ == "__main__":

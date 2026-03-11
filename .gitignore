@@ -10,7 +10,7 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Data folders
+# Data folders (runtime generated)
 Output/
 Input/
 
@@ -21,11 +21,26 @@ Input/
 # Test artifacts
 .pytest_cache/
 test.zip
+test/
+tests/
 
 # OS files
 Thumbs.db
 .DS_Store
 
-# Generated docs
+# Generated docs / local-only files
 *.docx
 *.xlsx
+
+# Loose anomaly reports (root-level, not in Output/)
+Anomaly_2025.txt
+Anomaly_Validation.txt
+
+# Development plan (not needed in production)
+plan.md
+
+# Windows batch scripts (not used on Azure Linux)
+run_project.bat
+
+# Gemini agent artifacts
+.gemini/

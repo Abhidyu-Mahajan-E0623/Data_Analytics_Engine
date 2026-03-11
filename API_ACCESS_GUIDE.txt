@@ -1,0 +1,213 @@
+======================================================================
+              SCHEMA MAKER API - ACCESS GUIDE
+======================================================================
+
+Everything another person needs to call the API from any machine.
+
+
+----------------------------------------------------------------------
+  BASE URL
+----------------------------------------------------------------------
+
+  https://azureapi-instance-gzd2h9dzhafbbcgv.centralus-01.azurewebsites.net
+
+
+----------------------------------------------------------------------
+  AUTHENTICATION
+----------------------------------------------------------------------
+
+  No API key is currently required. The endpoints are open.
+
+  Server-side secrets (Azure OpenAI key, Databricks token) are
+  configured as environment variables on the Azure App Service.
+  Callers never need them.
+
+
+----------------------------------------------------------------------
+  HEALTH CHECK
+----------------------------------------------------------------------
+
+  Verify the server is running before calling any pipeline:
+
+  curl https://azureapi-instance-gzd2h9dzhafbbcgv.centralus-01.azurewebsites.net/health
+
+  Expected response:
+    {"status": "ok"}
+
+  Note: Azure App Service may cold-start on the first request.
+  Allow up to 60 seconds.
+
+
+======================================================================
+                        API ENDPOINTS
+======================================================================
+
+
+----------------------------------------------------------------------
+  1. ANOMALY DETECTION
+----------------------------------------------------------------------
+
+  Method:   POST
+  Path:     /api/anomaly
+  Timeout:  Allow up to 5 minutes
+
+  Request body (optional - defaults to "bronze"):
+
+    {
+      "schema": "bronze"
+    }
+
+  Response (200 OK):
+
+    {
+      "run_id": "run_20260309T...",
+      "total_anomalies": 12,
+      "report_text": "======= DATA QUALITY ANOMALY REPORT ======= ..."
+    }
+
+  cURL example:
+
+    curl -X POST \
+      https://azureapi-instance-gzd2h9dzhafbbcgv.centralus-01.azurewebsites.net/api/anomaly \
+      -H "Content-Type: application/json" \
+      -d "{\"schema\": \"bronze\"}"
+
+
+----------------------------------------------------------------------
+  2. HYPOTHESIS GENERATION
+----------------------------------------------------------------------
+
+  Method:   POST
+  Path:     /api/hypothesis
+  Timeout:  Allow up to 10 minutes
+
+  Request body (both fields required):
+
+    {
+      "schema": "bronze",
+      "domain": "sales,marketing"
+    }
+
+  Fields:
+    schema   Databricks schema to scan for table metadata
+             Examples: bronze, silver
+
+    domain   Business focus area(s), comma-separated
+             Examples: sales, marketing, sales,administration
+
+  Response (200 OK):
+
+    {
+      "run_id": "run_20260309T...",
+      "valid_count": 10,
+      "invalid_count": 0,
+      "hypotheses_text": "... formatted hypotheses ...",
+      "metrics_tables_created": true
+    }
+
+  cURL example:
+
+    curl -X POST \
+      https://azureapi-instance-gzd2h9dzhafbbcgv.centralus-01.azurewebsites.net/api/hypothesis \
+      -H "Content-Type: application/json" \
+      -d "{\"schema\": \"bronze\", \"domain\": \"sales\"}"
+
+
+----------------------------------------------------------------------
+  3. INSIGHT GENERATION
+----------------------------------------------------------------------
+
+  Method:   POST
+  Path:     /api/insight
+  Timeout:  Allow up to 5 minutes
+
+  Request body (both optional - defaults to latest run, all hypotheses):
+
+    {
+      "run_id": "",
+      "hypothesis_ids": [1, 4, 5, 6]
+    }
+
+  Fields:
+    run_id          Hypothesis run ID to read from
+                    Leave "" for the latest run
+
+    hypothesis_ids  Which hypotheses to generate insights for
+                    Example: [1, 4, 5, 6]
+                    Leave empty [] for all
+
+  Response (200 OK):
+
+    {
+      "run_id": "run_20260309T...",
+      "insight_count": 4,
+      "insight_text": "======= OVERALL INSIGHTS ======= ..."
+    }
+
+  cURL example:
+
+    curl -X POST \
+      https://azureapi-instance-gzd2h9dzhafbbcgv.centralus-01.azurewebsites.net/api/insight \
+      -H "Content-Type: application/json" \
+      -d "{\"run_id\": \"\", \"hypothesis_ids\": [1, 2, 3]}"
+
+
+----------------------------------------------------------------------
+  INTERACTIVE DOCS (SWAGGER UI)
+----------------------------------------------------------------------
+
+  FastAPI auto-generates interactive documentation.
+  You can test all endpoints directly from the browser:
+
+  https://azureapi-instance-gzd2h9dzhafbbcgv.centralus-01.azurewebsites.net/docs
+
+
+----------------------------------------------------------------------
+  PYTHON TEST CLIENT
+----------------------------------------------------------------------
+
+  A ready-made interactive CLI client is in the test/ folder:
+
+    cd test
+    pip install -r requirements.txt
+    python client.py
+
+
+----------------------------------------------------------------------
+  ERROR RESPONSES
+----------------------------------------------------------------------
+
+  All errors return HTTP 500 with a JSON detail:
+
+    {
+      "detail": "Error message describing what went wrong"
+    }
+
+
+======================================================================
+          ENVIRONMENT VARIABLES (SERVER-SIDE ONLY)
+======================================================================
+
+  These are configured on the Azure App Service.
+  Callers never need them.
+
+  Variable                         Purpose
+  -------------------------------- --------------------------------------
+  AZURE_OPENAI_ENDPOINT            Azure OpenAI service URL
+  AZURE_OPENAI_API_KEY             Azure OpenAI API key
+  AZURE_OPENAI_API_VERSION         API version (e.g. 2024-02-15-preview)
+  AZURE_OPENAI_CHAT_DEPLOYMENT     Chat model deployment name
+  AZURE_OPENAI_EMBED_DEPLOYMENT    Embedding model deployment name
+  DATABRICKS_HOST                  Databricks workspace URL
+  DATABRICKS_TOKEN                 Databricks personal access token
+  DATABRICKS_SQL_WAREHOUSE_ID      SQL Warehouse ID
+  DATABRICKS_CATALOG               Unity Catalog name
+  DATABRICKS_SCHEMA_DOMAIN         Default data schema
+  DATABRICKS_SCHEMA_MONITORING     Monitoring schema (metrics tables)
+  DEFAULT_TOP_K                    Number of top tables (default: 10)
+  OUTPUT_TIMEZONE                  Timezone for timestamps
+
+
+======================================================================
+  END OF GUIDE
+======================================================================
